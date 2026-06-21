@@ -176,6 +176,7 @@ function parseJSON(value: unknown) {
 export function policy(opts: {
   provider: string
   parse: (error: unknown) => Err
+  onRetry?: (input: { attempt: number; error: Err; retry: Retryable; wait: number }) => Effect.Effect<void>
   set: (input: { attempt: number; message: string; action?: Retryable["action"]; next: number }) => Effect.Effect<void>
 }) {
   return Schedule.fromStepWithMetadata(
@@ -186,6 +187,7 @@ export function policy(opts: {
       return Effect.gen(function* () {
         const wait = delay(meta.attempt, SessionV1.APIError.isInstance(error) ? error : undefined)
         const now = yield* Clock.currentTimeMillis
+        if (opts.onRetry) yield* opts.onRetry({ attempt: meta.attempt, error, retry, wait })
         yield* opts.set({
           attempt: meta.attempt,
           message: retry.message,

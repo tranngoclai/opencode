@@ -11,6 +11,8 @@ import type {
   Config as SDKConfig,
 } from "@opencode-ai/sdk"
 import type { Provider as ProviderV2, Model as ModelV2, Auth } from "@opencode-ai/sdk/v2"
+import type { OAuthHook } from "./oauth.js"
+export * from "./oauth.js"
 
 import type { BunShell } from "./shell.js"
 import { type ToolDefinition } from "./tool.js"
@@ -228,6 +230,7 @@ export interface Hooks {
   }
   auth?: AuthHook
   provider?: ProviderHook
+  oauth?: OAuthHook
   /**
    * Called when a new message is received
    */

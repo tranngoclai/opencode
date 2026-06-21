@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import type { AuthOAuthResult, Hooks } from "@opencode-ai/plugin"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Auth } from "@/auth"
+import { persistOAuthResult } from "./oauth-persist"
 import { InstanceState } from "@/effect/instance-state"
 import { optional } from "@opencode-ai/core/schema"
 import { Plugin } from "../plugin"
@@ -99,6 +100,7 @@ export interface Interface {
 
 interface State {
   hooks: Record<ProviderV2.ID, Hook>
+  oauth: NonNullable<Hooks["oauth"]>[]
   pending: Map<ProviderV2.ID, AuthOAuthResult>
 }
 
@@ -122,6 +124,7 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
                 : Result.failVoid,
             ),
           ),
+          oauth: plugins.flatMap((item) => (item.oauth ? [item.oauth] : [])),
           pending: new Map<ProviderV2.ID, AuthOAuthResult>(),
         }
       }),
@@ -188,8 +191,8 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
     const callback = Effect.fn("ProviderAuth.callback")(function* (
       input: { providerID: ProviderV2.ID } & CallbackInput,
     ) {
-      const pending = (yield* InstanceState.get(state)).pending
-      const match = pending.get(input.providerID)
+      const current = yield* InstanceState.get(state)
+      const match = current.pending.get(input.providerID)
       if (!match) return yield* new OauthMissing({ providerID: input.providerID })
       if (match.method === "code" && !input.code) {
         return yield* new OauthCodeMissing({ providerID: input.providerID })
@@ -210,12 +213,11 @@ export const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> =
 
       if ("refresh" in result) {
         const { type: _, provider: __, refresh, access, expires, ...extra } = result
-        yield* auth.set(input.providerID, {
-          type: "oauth",
-          access,
-          refresh,
-          expires,
-          ...extra,
+        yield* persistOAuthResult({
+          auth,
+          oauth: current.oauth,
+          providerID: input.providerID,
+          account: { access, refresh, expires, ...extra },
         })
       }
     })
