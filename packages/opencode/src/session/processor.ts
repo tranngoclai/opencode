@@ -16,7 +16,7 @@ import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
-import { recordOAuthOutcome } from "./oauth-outcome"
+import { rotateOnFailure } from "./oauth-outcome"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
 import type { Provider } from "@/provider/provider"
@@ -643,7 +643,6 @@ export const layer = Layer.effect(
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
             )
-            yield* recordOAuthOutcome({ providerID: ctx.model.providerID, plugin, ok: true })
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
@@ -661,7 +660,7 @@ export const layer = Layer.effect(
               SessionRetry.policy({
                 provider: input.model.providerID,
                 parse,
-                onRetry: (info) => recordOAuthOutcome({ providerID: input.model.providerID, plugin, ok: false, error: info.error, wait: info.wait }),
+                onRetry: (info) => rotateOnFailure({ providerID: input.model.providerID, error: info.error, wait: info.wait }),
                 set: (info) => {
                   return status.set(ctx.sessionID, {
                     type: "retry",

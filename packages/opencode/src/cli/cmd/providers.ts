@@ -12,7 +12,7 @@ import os from "os"
 import { Config } from "@/config/config"
 import { Global } from "@opencode-ai/core/global"
 import { Plugin } from "../../plugin"
-import { logoutPoolAccount, poolUpsert, renderPoolAccounts } from "./providers-oauth-pool"
+import { logoutPoolAccount, renderPoolAccounts } from "./providers-oauth-pool"
 import type { Hooks } from "@opencode-ai/plugin"
 import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
@@ -28,8 +28,7 @@ const promptValue = <Value>(value: Option.Option<Value>) => {
 
 const put = Effect.fn("Cli.providers.put")(function* (key: string, info: Auth.Info) {
   const auth = yield* Auth.Service
-  const plugin = yield* Plugin.Service
-  if (yield* poolUpsert({ auth, plugin, key, info })) return
+  // Auth.set routes OAuth credentials into the per-provider account pool automatically.
   yield* Effect.orDie(auth.set(key, info))
 })
 
@@ -252,12 +251,10 @@ export const ProvidersListCommand = effectCmd({
   command: "list",
   aliases: ["ls"],
   describe: "list providers and credentials",
-  // Lists global credentials + env vars, but pooled OAuth accounts render via
-  // Plugin.list(), which needs an InstanceRef. Bootstrap the instance.
-  instance: true,
+  // Lists global credentials + provider env vars; no project instance needed.
+  instance: false,
   handler: Effect.fn("Cli.providers.list")(function* (_args) {
     const authSvc = yield* Auth.Service
-    const pluginSvc = yield* Plugin.Service
     const modelsDev = yield* ModelsDev.Service
 
     UI.empty()
@@ -270,7 +267,7 @@ export const ProvidersListCommand = effectCmd({
 
     for (const [providerID, result] of results) {
       const name = database[providerID]?.name || providerID
-      if (yield* renderPoolAccounts({ auth: authSvc, plugin: pluginSvc, providerID, result, name })) continue
+      if (yield* renderPoolAccounts({ auth: authSvc, providerID, result, name })) continue
       yield* Prompt.log.info(`${name} ${UI.Style.TEXT_DIM}${result.type}`)
     }
 
@@ -502,12 +499,10 @@ export const ProvidersLogoutCommand = effectCmd({
       describe: "provider id or name to log out from",
       type: "string",
     }),
-  // Removes a global auth credential, but pooled OAuth logout reads plugin hooks
-  // via Plugin.list(), which needs an InstanceRef. Bootstrap the instance.
-  instance: true,
+  // Removes a global auth credential; no project instance needed.
+  instance: false,
   handler: Effect.fn("Cli.providers.logout")(function* (args) {
     const authSvc = yield* Auth.Service
-    const pluginSvc = yield* Plugin.Service
     const modelsDev = yield* ModelsDev.Service
 
     UI.empty()
@@ -537,7 +532,7 @@ export const ProvidersLogoutCommand = effectCmd({
         )
     if (!provider) return yield* fail(`Unknown configured provider "${args.provider}"`)
 
-    if (!args.provider && (yield* logoutPoolAccount({ auth: authSvc, plugin: pluginSvc, providerID: provider }))) {
+    if (!args.provider && (yield* logoutPoolAccount({ auth: authSvc, providerID: provider }))) {
       yield* Prompt.outro("Logout successful")
       return
     }

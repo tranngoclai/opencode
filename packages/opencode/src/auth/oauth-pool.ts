@@ -1,8 +1,4 @@
-import type { OAuthPoolStore, OAuthStoredRecord } from "@opencode-ai/plugin"
-import { Effect, Option } from "effect"
 import { Oauth, type Info } from "./schema"
-
-export const AUTH_VERSION = 2
 
 export type OAuthProviderPool = {
   type: "oauth"
@@ -13,9 +9,29 @@ export type OAuthProviderPool = {
 
 export type RawProvider = Info | OAuthProviderPool | unknown
 
-type OAuthPoolProviderStore = Parameters<OAuthPoolStore["update"]>[0] extends (store: { providers: infer Providers }) => unknown
-  ? Providers
-  : never
+export type OAuthStoredRecord = {
+  id: string
+  namespace: string
+  createdAt: number
+  updatedAt: number
+  access: string
+  refresh: string
+  expires: number
+  accountId?: string
+  enterpriseUrl?: string
+  label?: string
+  health: {
+    successCount: number
+    failureCount: number
+    lastStatusCode?: number
+    cooldownUntil?: number
+    lastErrorAt?: number
+  }
+}
+
+export type OAuthAccount = Omit<OAuthStoredRecord, "access" | "refresh"> & {
+  active: boolean
+}
 
 // On-disk format wraps the provider map in a `{ version, providers }` envelope.
 // Legacy files store the flat provider map at the top level; accept both.
@@ -140,78 +156,95 @@ export function updateActiveOAuthRecord(provider: OAuthProviderPool, info: Oauth
   }
 }
 
+export function listOAuthAccounts(value: RawProvider): OAuthAccount[] {
+  const provider = toOAuthProviderPool(value)
+  if (!provider) return []
+  const active = selectRecord(provider, "default")
+  return recordsForNamespace(provider, "default").map((record) => ({
+    id: record.id,
+    namespace: record.namespace,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    expires: record.expires,
+    accountId: record.accountId,
+    enterpriseUrl: record.enterpriseUrl,
+    label: record.label,
+    health: record.health,
+    active: record.id === active?.id,
+  }))
+}
+
+export function removeOAuthAccount(value: RawProvider, recordID: string) {
+  const provider = toOAuthProviderPool(value)
+  if (!provider) return { provider: undefined, removed: false, remaining: 0 }
+  const records = provider.records.filter((record) => !(record.id === recordID && record.namespace === "default"))
+  const removed = records.length !== provider.records.length
+  const remaining = records.filter((record) => record.namespace === "default").length
+  if (!removed) return { provider, removed: false, remaining }
+  if (records.length === 0) return { provider: undefined, removed: true, remaining: 0 }
+  const order = normalizeOrder(
+    records.filter((record) => record.namespace === "default").map((record) => record.id),
+    provider.order.default ?? [],
+  ).filter((id) => id !== recordID)
+  return {
+    provider: {
+      ...provider,
+      records,
+      active: { ...provider.active, default: provider.active.default === recordID ? order[0] : provider.active.default },
+      order: { ...provider.order, default: order },
+    },
+    removed: true,
+    remaining,
+  }
+}
+
+export function rotateOAuthAccount(value: RawProvider, input?: { cooldownUntil?: number; statusCode?: number }) {
+  const provider = toOAuthProviderPool(value)
+  if (!provider) return undefined
+  const active = selectRecord(provider, "default")
+  if (!active) return provider
+  const order = normalizeOrder(
+    provider.records.filter((record) => record.namespace === "default").map((record) => record.id),
+    provider.order.default ?? [],
+  )
+  const now = Date.now()
+  const records = provider.records.map((record) =>
+    record.id === active.id && record.namespace === "default"
+      ? {
+          ...record,
+          updatedAt: now,
+          health: {
+            ...record.health,
+            failureCount: record.health.failureCount + 1,
+            lastErrorAt: now,
+            lastStatusCode: input?.statusCode,
+            cooldownUntil: input?.cooldownUntil ?? record.health.cooldownUntil,
+          },
+        }
+      : record,
+  )
+  const nextOrder = order.filter((id) => id !== active.id).concat(active.id)
+  const nextActive = nextOrder.find((id) => {
+    const record = records.find((item) => item.id === id && item.namespace === "default")
+    return !record?.health.cooldownUntil || record.health.cooldownUntil <= now
+  }) ?? nextOrder[0]
+  return {
+    ...provider,
+    records,
+    active: { ...provider.active, default: nextActive },
+    order: { ...provider.order, default: nextOrder },
+  }
+}
+
 function normalizeOrder(ids: string[], order: string[]) {
   return [...order.filter((id, index) => ids.includes(id) && order.indexOf(id) === index), ...ids.filter((id) => !order.includes(id))]
 }
 
-export function createPoolStore(deps: {
-  allRaw: () => Effect.Effect<Record<string, RawProvider>, unknown>
-  writeRaw: (data: Record<string, RawProvider>) => Effect.Effect<void, unknown>
-  decode: (value: unknown) => Option.Option<Info>
-}): OAuthPoolStore {
-  const { allRaw, writeRaw, decode } = deps
-
-  // Serial queue prevents concurrent update() calls from clobbering each other (TOCTOU).
-  // Effect.runPromise is safe here because allRaw/writeRaw close over already-resolved
-  // service instances from the parent layer — no Effect runtime services are required.
-  let updateQueue: Promise<unknown> = Promise.resolve()
-  function enqueueUpdate<T>(fn: () => Promise<T>): Promise<T> {
-    const next = updateQueue.then(fn, fn)
-    updateQueue = next.then(() => undefined, () => undefined)
-    return next
-  }
-
-  return {
-    snapshot(providerID, namespace = "default") {
-      return Effect.runPromise(
-        Effect.gen(function* () {
-          const provider = toOAuthProviderPool((yield* allRaw())[providerID])
-          if (!provider) return { records: [], orderedIDs: [] }
-          const records = provider.records.filter((record) => record.namespace === namespace)
-          const orderedIDs = normalizeOrder(
-            records.map((record) => record.id),
-            provider.order[namespace] ?? [],
-          )
-          return {
-            records: records.map((record) => ({ ...record, providerID, recordID: record.id })),
-            orderedIDs,
-            activeID: provider.active[namespace] ?? orderedIDs[0],
-          }
-        }),
-      )
-    },
-    update(fn) {
-      return enqueueUpdate(() => Effect.runPromise(
-        Effect.gen(function* () {
-          const raw = yield* allRaw()
-          const providers: OAuthPoolProviderStore = Object.fromEntries(
-            Object.entries(raw).flatMap((entry): Array<readonly [string, OAuthPoolProviderStore[string]]> => {
-              const [providerID, value] = entry
-              const pool = toOAuthProviderPool(value)
-              if (pool) return [[providerID, pool] as const]
-              const decoded = decode(value)
-              if (decoded._tag === "Some" && decoded.value.type !== "oauth") return [[providerID, decoded.value] as const]
-              return []
-            }),
-          )
-          const before = Object.fromEntries(Object.entries(providers).map(([providerID, value]) => [providerID, JSON.stringify(value)]))
-          const result = yield* Effect.promise(() => Promise.resolve(fn({ providers })))
-          if (!result.changed) return result.value
-          const next = { ...raw }
-          for (const providerID of Object.keys(before)) {
-            if (!(providerID in providers)) delete next[providerID]
-          }
-          for (const [providerID, value] of Object.entries(providers)) {
-            if (before[providerID] === JSON.stringify(value)) continue
-            next[providerID] = value
-          }
-          yield* writeRaw(next)
-          return result.value
-        }),
-      ))
-    },
-    updateBestEffort(fn) {
-      return this.update(fn).then(() => undefined, () => undefined)
-    },
-  }
+function recordsForNamespace(provider: OAuthProviderPool, namespace: string) {
+  const records = provider.records.filter((record) => record.namespace === namespace)
+  const order = normalizeOrder(
+    records.map((record) => record.id),
+    provider.order[namespace] ?? [],
+  )
+  return order.map((id) => records.find((record) => record.id === id)).filter((record): record is OAuthStoredRecord => record !== undefined)
 }

@@ -1,16 +1,17 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import type { OAuthPoolStore } from "@opencode-ai/plugin"
 import path from "path"
 import { Effect, Layer, Record, Result, Schema, Context } from "effect"
 import { Global } from "@opencode-ai/core/global"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import {
-  AUTH_VERSION,
   activeOAuth,
-  createPoolStore,
+  listOAuthAccounts,
+  removeOAuthAccount,
+  rotateOAuthAccount,
   toOAuthProviderPool,
   unwrapProviders,
   updateActiveOAuthRecord,
+  type OAuthAccount,
   type RawProvider,
 } from "./oauth-pool"
 export { Oauth, Api, WellKnown, Info, AuthError } from "./schema"
@@ -27,7 +28,9 @@ export interface Interface {
   readonly all: () => Effect.Effect<Record<string, Info>, AuthError>
   readonly set: (key: string, info: Info) => Effect.Effect<void, AuthError>
   readonly remove: (key: string) => Effect.Effect<void, AuthError>
-  readonly poolStore?: () => OAuthPoolStore
+  readonly accounts: (providerID: string) => Effect.Effect<OAuthAccount[], AuthError>
+  readonly removeAccount: (providerID: string, recordID: string) => Effect.Effect<{ removed: boolean; remaining: number }, AuthError>
+  readonly rotate: (providerID: string, input?: { cooldownUntil?: number; statusCode?: number }) => Effect.Effect<void, AuthError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Auth") {}
@@ -49,9 +52,7 @@ export const layer = Layer.effect(
     })
 
     const writeRaw = Effect.fn("Auth.writeRaw")(function* (data: Record<string, RawProvider>) {
-      yield* fsys
-        .writeJson(file, { version: AUTH_VERSION, providers: data }, 0o600)
-        .pipe(Effect.mapError(fail("Failed to write auth data")))
+      yield* fsys.writeJson(file, data, 0o600).pipe(Effect.mapError(fail("Failed to write auth data")))
     })
 
     const all = Effect.fn("Auth.all")(function* () {
@@ -90,11 +91,31 @@ export const layer = Layer.effect(
       yield* writeRaw(data)
     })
 
-    // Singleton so all callers share the same serial update queue (prevents TOCTOU races)
-    const poolStoreInstance = createPoolStore({ allRaw, writeRaw, decode })
-    const poolStore = (): OAuthPoolStore => poolStoreInstance
+    const accounts = Effect.fn("Auth.accounts")(function* (providerID: string) {
+      return listOAuthAccounts((yield* allRaw())[providerID])
+    })
 
-    return Service.of({ get, all, set, remove, poolStore })
+    const removeAccount = Effect.fn("Auth.removeAccount")(function* (providerID: string, recordID: string) {
+      const data = yield* allRaw()
+      const result = removeOAuthAccount(data[providerID], recordID)
+      if (!result.removed) return { removed: false, remaining: result.remaining }
+      if (result.provider) yield* writeRaw({ ...data, [providerID]: result.provider })
+      else {
+        const next = { ...data }
+        delete next[providerID]
+        yield* writeRaw(next)
+      }
+      return { removed: true, remaining: result.remaining }
+    })
+
+    const rotate = Effect.fn("Auth.rotate")(function* (providerID: string, input?: { cooldownUntil?: number; statusCode?: number }) {
+      const data = yield* allRaw()
+      const provider = rotateOAuthAccount(data[providerID], input)
+      if (!provider) return
+      yield* writeRaw({ ...data, [providerID]: provider })
+    })
+
+    return Service.of({ get, all, set, remove, accounts, removeAccount, rotate })
   }),
 )
 
