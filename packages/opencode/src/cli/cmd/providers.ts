@@ -12,6 +12,7 @@ import os from "os"
 import { Config } from "@/config/config"
 import { Global } from "@opencode-ai/core/global"
 import { Plugin } from "../../plugin"
+import { logoutPoolAccount, renderPoolAccounts } from "./providers-oauth-pool"
 import type { Hooks } from "@opencode-ai/plugin"
 import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
@@ -27,6 +28,7 @@ const promptValue = <Value>(value: Option.Option<Value>) => {
 
 const put = Effect.fn("Cli.providers.put")(function* (key: string, info: Auth.Info) {
   const auth = yield* Auth.Service
+  // Auth.set routes OAuth credentials into the per-provider account pool automatically.
   yield* Effect.orDie(auth.set(key, info))
 })
 
@@ -265,6 +267,7 @@ export const ProvidersListCommand = effectCmd({
 
     for (const [providerID, result] of results) {
       const name = database[providerID]?.name || providerID
+      if (yield* renderPoolAccounts({ auth: authSvc, providerID, result, name })) continue
       yield* Prompt.log.info(`${name} ${UI.Style.TEXT_DIM}${result.type}`)
     }
 
@@ -528,6 +531,12 @@ export const ProvidersLogoutCommand = effectCmd({
           }),
         )
     if (!provider) return yield* fail(`Unknown configured provider "${args.provider}"`)
+
+    if (!args.provider && (yield* logoutPoolAccount({ auth: authSvc, providerID: provider }))) {
+      yield* Prompt.outro("Logout successful")
+      return
+    }
+
     yield* Effect.orDie(authSvc.remove(provider))
     yield* Prompt.outro("Logout successful")
   }),
